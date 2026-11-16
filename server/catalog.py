@@ -340,6 +340,8 @@ class Catalog:
                 "subtitle": d.get("subtitle", ""),
                 "blender_ok": blender_ok(d),
                 "remote": bool(d.get("remote")),
+                "fab_tier": (d.get("fab") or {}).get("tier"),
+                **({"tv": int(d["fab"]["pulled_at"])} if (d.get("fab") or {}).get("pulled_at") else {}),
             })
         return total, out
 

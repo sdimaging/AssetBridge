@@ -33,6 +33,10 @@ from catalog import Catalog  # noqa: E402
 import scanners  # noqa: E402
 import health  # noqa: E402
 import send as sender  # noqa: E402
+import fab  # noqa: E402
+
+scanners.SCANNERS["fab"] = fab.scan_fab  # Fab (Quixel Megascans): indexed remotely, pulled on demand (server/fab.py)
+FAB_PULL_SLOTS = threading.Semaphore(3)  # downloads at once; more pulls wait their turn
 
 VERSION = "0.1.0"
 WEB = os.path.join(ROOT, "web")
@@ -164,6 +168,7 @@ class App:
         os.makedirs(THUMBS, exist_ok=True)
         self.cfg = load_config()
         self.catalog = Catalog(os.path.join(CACHE, "bridge2.db"))
+        fab.bind(self.catalog)
         import tagging
         if self.catalog.get_meta("tags_version") != str(tagging.TAGS_VERSION):  # vocabulary changed: re-tag once
             n = self.catalog.retag_all()
@@ -421,6 +426,52 @@ class App:
             raise RuntimeError(job.error or "conversion did not finish")
         return out
 
+    # ---- Fab: remote library, pulled on demand (server/fab.py) ----------------
+    def fab_lib(self, asset):
+        lib = next((l for l in self.cfg["libraries"] if asset and l["name"] == asset.get("library")), None)
+        if not lib or lib.get("kind") != "fab":
+            raise fab.FabError("Not a Fab asset")
+        return lib
+
+    def fab_index_async(self):
+        """Re-crawl the Fab catalogue (kind "fab_index"), then rescan every Fab library."""
+        def run(job):
+            res = fab.crawl(progress=lambda n, pages, sort: job.progress(step="%d listings (%d pages)" % (n, pages), done=n))
+            for lib in self.cfg["libraries"]:
+                if lib.get("kind") == "fab":
+                    self.scan_async(lib["name"])
+            return {"message": "%d listings indexed" % res["count"], **res}
+        return self.jobs.submit("fab_index", run, label="Indexing Fab", if_busy="join")
+
+    def fab_pull(self, asset_id, tier=None, wait=False):
+        """Download a Fab asset at a quality tier and make it local (kind "fab_pull", keyed on the asset: a second
+        request while one runs joins it). wait=True runs it inline (a send of a remote asset)."""
+        a = self.catalog.get(asset_id)
+        lib = self.fab_lib(a)
+        tier = tier if tier in fab.TIERS else (lib.get("tier") or "high")
+
+        def run(job):
+            job.progress(step="waiting for a download slot")
+            with FAB_PULL_SLOTS:
+                asset, info = fab.pull(lib, a["fab"]["uid"], tier, job)
+            self.catalog.upsert(asset, time.time())
+            self.catalog.commit()
+            return {"message": "%s (%s, %.0f MB)" % (asset["name"], info["label"], max(1, info["bytes"] / 1e6)),
+                    "id": asset["id"], **info}
+        label = "Pulling %s from Fab" % a["name"]
+        if wait:
+            return self.jobs.run("fab_pull", run, key=asset_id, label=label, timeout=3600)
+        return self.jobs.submit("fab_pull", run, key=asset_id, label=label, if_busy="join")
+
+    def fab_evict(self, asset_id):
+        a = self.catalog.get(asset_id)
+        lib = self.fab_lib(a)
+        if any(j.key == asset_id for j in self.jobs.list("fab_pull", active_only=True)):
+            raise fab.FabError("It's still downloading")
+        stub, size = fab.evict(lib, a["fab"]["uid"])
+        self.catalog.upsert(stub, time.time())
+        self.catalog.commit()
+        return size
 
     # ---- send --------------------------------------------------------------
     def send(self, asset_id, opts, target="c4d"):
@@ -444,6 +495,15 @@ class App:
         asset = self.catalog.get(asset_id)
         if not asset:
             return {"ok": False, "error": "Unknown asset"}
+        if asset.get("remote"):  # only on Fab: pull it first (the default quality, or the one asked for), then send
+            job.progress(step="pulling from Fab")
+            try:
+                pj = self.fab_pull(asset_id, (opts or {}).get("fab_tier"), wait=True)
+            except fab.FabError as e:
+                return {"ok": False, "error": str(e)}
+            if pj.state != jobs.SUCCEEDED:
+                return {"ok": False, "error": "Pull from Fab failed: %s" % (pj.error or pj.state)}
+            asset = self.catalog.get(asset_id)
         if target not in ("c4d", "blender"):
             return {"ok": False, "error": "Unknown target %r" % target}
         try:
@@ -724,6 +784,8 @@ class Handler(BaseHTTPRequestHandler):
                 a["smart_tags"] = APP.catalog.tags_for(a["id"])
                 if preview_of(a) == render_path(a["id"]):
                     a["tv"] = int(os.path.getmtime(render_path(a["id"])))
+                elif (a.get("fab") or {}).get("pulled_at"):
+                    a["tv"] = int(a["fab"]["pulled_at"])
             return self._json(a) if a else self._json({"error": "not found"}, 404)
         if p == "/api/facets":
             f = APP.catalog.facets()
@@ -770,6 +832,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": str(e)})
         if p == "/api/libraries":
             return self._json(APP.cfg["libraries"])
+        if p == "/api/fab/files":  # ?id=<asset>: the quality tiers Fab offers (public file list) + what's on disk
+            a = APP.catalog.get(q.get("id", ""))
+            try:
+                lib = APP.fab_lib(a)
+                info = fab.files_for(a["fab"]["uid"])
+            except fab.FabError as e:
+                return self._json({"ok": False, "error": str(e)})
+            return self._json({"ok": True, "format": info["format"], "msid": info["msid"],
+                               "tiers": {t: {"size": f["size"], "faces": f.get("faces"), "label": f.get("label")} for t, f in info["tiers"].items()},
+                               "default": lib.get("tier") or "high", "pulled": (a.get("fab") or {}).get("tier"),
+                               "bytes": (a.get("fab") or {}).get("bytes"), "url": a["fab"]["url"],
+                               "local_copies": fab.local_copies(info["msid"], lib["name"])})
+        if p == "/api/fab/index":
+            idx = fab.load_index()
+            return self._json({"count": idx.get("count", 0), "crawled_at": idx.get("crawled_at"),
+                               "job": (APP.jobs.latest("fab_index") or None) and APP.jobs.latest("fab_index").to_dict()})
         if p == "/api/health":
             if APP.health is None and not APP.health_state["running"]:
                 APP.health_async()
@@ -780,6 +858,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(rep)
         if p.startswith("/thumb/"):
             a = APP.catalog.get(unquote(p[len("/thumb/"):]))
+            if a and a.get("remote"):  # only on Fab: its listing thumbnail, fetched once and kept (~20 KB)
+                t = fab.thumb_file(a)
+                if not t:
+                    return self._placeholder(a)
+                if a.get("color") is None and Image is not None:
+                    try:
+                        APP.catalog.set_color(a["id"], _avg_color(Image.open(t).convert("RGB").resize((24, 14))))
+                    except Exception:
+                        pass
+                return self._file(t, "image/jpeg")
             pv = preview_of(a)
             if not pv:
                 return self._placeholder(a)
@@ -789,6 +877,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._file(pv)
         if p.startswith("/preview/"):
             a = APP.catalog.get(unquote(p[len("/preview/"):]))
+            if a and a.get("remote"):  # only on Fab: the listing's large render, straight from Fab's CDN (not stored)
+                big = ((a.get("fab") or {}).get("thumb") or {}).get("l")
+                if big:
+                    self.send_response(302)
+                    self.send_header("Location", big)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                return self._placeholder(a)
             pv = preview_of(a)
             if a and q.get("i") and (a.get("previews") or [])[1:]:  # another of the asset's preview images
                 pv = a["previews"][max(0, min(int(q["i"]), len(a["previews"]) - 1))]
@@ -875,6 +972,20 @@ class Handler(BaseHTTPRequestHandler):
         b = self._body()
         if p == "/api/send":
             return self._json(APP.send(b["id"], b.get("options", {}), b.get("target", "c4d")))
+        if p == "/api/fab/pull":  # {id, tier: low|mid|high|raw} -> job (GET /api/jobs/<job>?wait=60 until it ends)
+            try:
+                job = APP.fab_pull(b.get("id", ""), b.get("tier"))
+            except fab.FabError as e:
+                return self._json({"ok": False, "error": str(e)})
+            return self._json({"ok": True, "job": job.id, "joined": job.requests > 1})
+        if p == "/api/fab/evict":  # {id}: delete the pulled files; the asset stays listed (remote again)
+            try:
+                size = APP.fab_evict(b.get("id", ""))
+            except fab.FabError as e:
+                return self._json({"ok": False, "error": str(e)})
+            return self._json({"ok": True, "freed": size, "message": "Freed %.0f MB" % (size / 1e6)})
+        if p == "/api/fab/index":  # re-crawl the Fab catalogue, then rescan the Fab libraries
+            return self._json({"ok": True, "job": APP.fab_index_async().id})
         if p == "/api/label":  # {ids:[...], label, on}
             ids = b.get("ids") or ([b["id"]] if b.get("id") else [])
             APP.catalog.set_labels(ids, b.get("label", ""), bool(b.get("on", True)), time.time())
@@ -912,6 +1023,9 @@ class Handler(BaseHTTPRequestHandler):
             a = APP.catalog.get(b["id"])
             if not a:
                 return self._json({"ok": False}, 404)
+            if a.get("remote"):  # nothing on disk yet: show its Fab page
+                webbrowser.open(a["fab"]["url"])
+                return self._json({"ok": True})
             target = a.get("preview") or a["path"]
             if os.name == "nt":
                 subprocess.Popen(["explorer", "/select,", os.path.normpath(target)])
@@ -1002,6 +1116,8 @@ def main():
     print("%s v%s  ->  %s" % (BRAND["name"], VERSION, url))
     if not args.no_scan:
         APP.scan_async()
+        if any(l.get("kind") == "fab" for l in cfg["libraries"]) and not fab.load_index().get("items"):
+            APP.fab_index_async()  # first run with a Fab library: build the index (then it rescans)
     if not args.no_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     try:

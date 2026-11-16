@@ -121,6 +121,7 @@
     ["Min resolution", [["res>=2K", "2K"], ["res>=4K", "4K"], ["res>=8K", "8K"], ["res>=16K", "16K"]]],
     ["Format", [["fmt:fbx", "FBX"], ["fmt:glb", "GLB"], ["fmt:obj", "OBJ"], ["fmt:abc", "ABC"], ["fmt:usd", "USD"], ["fmt:ply", "PLY"], ["fmt:spz", "SPZ"]]],
     ["Housekeeping", [["no:preview", "No preview"], ["conformed", (window.BRAND && window.BRAND.format_name) || "Asset Format"]]],
+    ["Availability", [["local", "On disk"], ["remote", "On Fab (not downloaded)"]]],
   ];
   const FILTER_LABEL = Object.fromEntries(FILTER_GROUPS.flatMap(([g, items]) => items.map(([k, l]) => [k, g === "Min resolution" ? "≥ " + l : l])));
   const RES_KEYS = FILTER_GROUPS[2][1].map(([k]) => k);
@@ -347,6 +348,9 @@
       a.blender_ok === false ? null :
       h("button", { class: "sendbtn alt", title: "Send to Blender",
         onclick: e => { e.stopPropagation(); sendAsset(a.id, el, "blender"); } }, h("i", { class: "ic ic-send" }), "Blender"));
+    if (a.remote) send = h("div", { class: "sendgroup" },
+      h("button", { class: "sendbtn", title: "Download from Fab (" + tierLabel(S.opts.fab_tier) + ") - double-click downloads and sends",
+        onclick: e => { e.stopPropagation(); fabPull(a.id, null, el); } }, h("i", { class: "ic ic-cloud" }), "Get"));
     const el = h("div", { class: "card" + (info.fit ? " fit" : "") + (a.remote ? " remote" : "") + (S.sel === a.id ? " sel" : "") + (S.multi.has(a.id) ? " picked" : ""),
                           tabindex: "0", role: "option", "data-id": a.id, "data-idx": idx,
                           onclick: (e) => (e.ctrlKey || e.metaKey) ? togglePick(a.id, el) : select(a.id),
@@ -354,6 +358,7 @@
       h("div", { class: "thumb" }, img,
         h("span", { class: "badge", text: ({ "3d": "3D", hdri: "HDRI" })[a.type] || a.type[0].toUpperCase() + a.type.slice(1) }),
         a.resolutions && a.resolutions.length ? h("span", { class: "res", text: a.resolutions.join(" · ") }) : null,
+        a.remote ? h("span", { class: "cloud", title: "On Fab - not downloaded yet" }, h("i", { class: "ic ic-cloud" }), "Fab") : null,
         fav, send),
       h("div", { class: "info" },
         h("div", { class: "name", text: a.name, title: a.name }),
@@ -481,6 +486,7 @@
 
     $("#d-result").hidden = true;
     $("#d-opts").hidden = !!a.remote;
+    renderFab(a);
     renderLabels(a);
     const smart = a.smart_tags || {};  // clickable smart tags first (filter), then the vendor's own words (search)
     $("#d-tags").replaceChildren(
@@ -601,6 +607,116 @@
 
   function saveOpts() { store.set("opts", S.opts); }
 
+  // ------------------------------------------------------------- Fab: on Fab until pulled (server/fab.py)
+  const TIER_NAMES = { low: "Low", mid: "Mid", high: "High", raw: "Raw", file: "File" };
+  const tierLabel = t => TIER_NAMES[t || "high"] || t;
+  const mb = n => n == null ? "" : n >= 1e9 ? (n / 1e9).toFixed(1) + " GB" : Math.max(1, Math.round(n / 1e6)) + " MB";
+  S.fabFiles = {};     // asset id -> /api/fab/files reply
+  S.pulling = new Map(); // asset id -> job id (one pull per asset)
+
+  async function renderFab(a) {
+    const box = $("#d-fab");
+    box.hidden = !a.fab;
+    if (!a.fab) return;
+    $("#d-fab-link").href = a.fab.url;
+    const state = $("#d-fab-state");
+    state.textContent = a.remote ? "On Fab · not downloaded" : "On disk · " + tierLabel(a.fab.tier) + (a.fab.bytes ? " · " + mb(a.fab.bytes) : "");
+    $("#d-fab-evict").hidden = !!a.remote;
+    $("#d-fab-note").textContent = a.remote ? "Cinema 4D / Blender sends download it first, at the quality picked here." : "";
+    const paint = (info) => {
+      if (!S.selAsset || S.selAsset.id !== a.id) return;
+      const tiers = info && info.ok ? Object.keys(info.tiers).sort((x, y) => (info.tiers[x].size || 0) - (info.tiers[y].size || 0)) : [];
+      if (!S.opts.fab_tier && info && info.default) S.opts.fab_tier = info.default;
+      const cur = tiers.includes(S.opts.fab_tier) ? S.opts.fab_tier : (tiers.includes("high") ? "high" : tiers[tiers.length - 1]);
+      seg("#o-fabtier", tiers, [cur], v => { S.opts.fab_tier = v; saveOpts(); renderFab(S.selAsset); },
+          Object.fromEntries(tiers.map(t => [t, (info.tiers[t].label || tierLabel(t)) + " · " + mb(info.tiers[t].size)])));
+      const get = $("#d-fab-get");
+      const busy = S.pulling.has(a.id);
+      const same = !a.remote && cur === a.fab.tier;
+      get.hidden = same && !busy;
+      get.disabled = busy;
+      $("span", get).textContent = busy ? "Downloading…" : (a.remote ? "Download " : "Re-download as ") +
+        (tiers.length ? info.tiers[cur].label || tierLabel(cur) : tierLabel(cur)) +
+        (tiers.length ? " (" + mb(info.tiers[cur].size) + ")" : "");
+      if (info && !info.ok) $("#d-fab-note").textContent = info.error;
+      const copy = info && info.ok && (info.local_copies || [])[0];
+      if (copy && a.remote) $("#d-fab-note").replaceChildren("Already on disk in " + copy.library +
+        (copy.resolutions.length ? " (" + copy.resolutions.join(", ") + ")" : "") + " · ",
+        h("button", { class: "link", text: "Open that copy", onclick: () => select(copy.id) }));
+    };
+    paint(S.fabFiles[a.id]);
+    if (!S.fabFiles[a.id]) {
+      try { S.fabFiles[a.id] = await api("/api/fab/files?id=" + enc(a.id)); } catch (e) { S.fabFiles[a.id] = { ok: false, error: String(e) }; }
+      paint(S.fabFiles[a.id]);
+    }
+    if (S.pulling.has(a.id)) fabWatch(a.id, S.pulling.get(a.id));
+  }
+
+  async function fabPull(id, tier, cardEl) {
+    if (S.pulling.has(id)) return;
+    const r = await api("/api/fab/pull", { id, tier: tier || S.opts.fab_tier || null });
+    if (!r.ok) return toast(r.error || "Couldn't start the download", true);
+    S.pulling.set(id, r.job);
+    const el = cardEl || $(`.card[data-id="${CSS.escape(id)}"]`);
+    el && el.classList.add("sending");
+    if (S.selAsset && S.selAsset.id === id) renderFab(S.selAsset);
+    fabWatch(id, r.job);
+  }
+
+  // follow one pull to its end: the server holds each request until the job moves on or a second passes (no sleeps)
+  const fabWatching = new Set();
+  async function fabWatch(id, jobId) {
+    if (fabWatching.has(jobId)) return;
+    fabWatching.add(jobId);
+    let j;
+    try {
+      for (;;) {
+        j = await api("/api/jobs/" + enc(jobId) + "?wait=1");
+        if (S.selAsset && S.selAsset.id === id) {
+          const p = $("#d-fab-prog");
+          p.hidden = false;
+          p.classList.toggle("indet", !(j.total > 0));
+          $(".bar i", p).style.width = j.total > 0 ? Math.min(100, 100 * j.done / j.total) + "%" : "";
+          $("span", p).textContent = j.step || j.state;
+        }
+        if (!["queued", "running"].includes(j.state)) break;
+      }
+    } catch (e) { j = { state: "failed", error: String(e) }; }
+    fabWatching.delete(jobId);
+    S.pulling.delete(id);
+    const el = $(`.card[data-id="${CSS.escape(id)}"]`);
+    el && el.classList.remove("sending");
+    if (S.selAsset && S.selAsset.id === id) $("#d-fab-prog").hidden = true;
+    if (j.state !== "succeeded") return toast("Download failed: " + (j.error || j.state), true);
+    toast("Downloaded " + (j.message || ""));
+    fabLanded(id, el);
+  }
+
+  // a pull finished: the card becomes a normal local asset, and the open detail panel reloads it
+  async function fabLanded(id, el) {
+    delete S.fabFiles[id];
+    const a = await api("/api/asset/" + enc(id));
+    if (a.error) return;
+    el = el || $(`.card[data-id="${CSS.escape(id)}"]`);
+    if (el && el.isConnected) {
+      const item = { id: a.id, library: a.library, type: a.type, name: a.name, color: a.color, fav: !!a.favorite,
+        resolutions: a.resolutions || [], has_thumb: !!a.preview, format: a.format, importable: a.importable,
+        subtitle: a.subtitle, blender_ok: a.blender_ok, remote: !!a.remote, tv: a.tv };
+      el.replaceWith(card(item, +el.dataset.idx));
+    }
+    if (S.selAsset && S.selAsset.id === id) select(id);
+  }
+
+  async function fabEvict(id) {
+    const a = S.selAsset;
+    if (!a || a.id !== id) return;
+    if (!confirm("Delete the downloaded files for “" + a.name + "”" + (a.fab.bytes ? " (" + mb(a.fab.bytes) + ")" : "") +
+                 "? It stays in AssetBridge and can be downloaded again.")) return;
+    const r = await api("/api/fab/evict", { id });
+    if (!r.ok) return toast(r.error || "Couldn't free the space", true);
+    toast(r.message);
+    fabLanded(id);
+  }
 
   // ------------------------------------------------------------- actions
   // Which sends are in flight ("<id>|<target>"): the buttons are derived from it, so re-rendering the panel
@@ -629,6 +745,8 @@
     store.set("target", target);
     const fromDetail = S.selAsset && S.selAsset.id === id;
     const options = Object.assign({}, S.opts);
+    const remote = el ? el.classList.contains("remote") : !!(S.selAsset && S.selAsset.id === id && S.selAsset.remote);
+    if (remote) toast("Downloading from Fab (" + tierLabel(S.opts.fab_tier) + "), then sending to " + app + "…");
     if (fromDetail) {
       options.resolution = pickRes(S.selAsset) || S.opts.resolution;
       if (S.local.lod) options.lod = S.local.lod;
@@ -651,6 +769,7 @@
     if (r.ok) {
       el && (el.classList.add("done"), setTimeout(() => el.classList.remove("done"), 1500));
       toast(r.message || "Sent to " + app);
+      if (remote) fabLanded(id, el);
     } else {
       el && el.classList.add("failed");
       toast(r.error || "Send failed", true);
@@ -809,6 +928,8 @@
     $("#d-send-b").addEventListener("click", () => S.selAsset && sendAsset(S.selAsset.id, null, "blender"));
     $("#d-fav").addEventListener("click", () => S.selAsset && toggleFav(S.selAsset, null));
     $("#d-reveal").addEventListener("click", () => S.selAsset && api("/api/reveal", { id: S.selAsset.id }));
+    $("#d-fab-get").addEventListener("click", () => S.selAsset && fabPull(S.selAsset.id, S.opts.fab_tier));
+    $("#d-fab-evict").addEventListener("click", () => S.selAsset && fabEvict(S.selAsset.id));
     $("#d-remove").addEventListener("click", () => S.selAsset && askRemove([S.selAsset.id]));
     $("#multi-remove").addEventListener("click", () => askRemove([...S.multi]));
     $("#del-cancel").addEventListener("click", () => $("#del-dialog").close());

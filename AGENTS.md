@@ -117,6 +117,7 @@ Use double backslashes in JSON paths. Pick the `kind` per folder:
 | `generic` | everything else: Poly Haven, Poliigon, Textures.com, ShareTextures, CGAxis, KitBash3D, splat collections, loose models and texture sets. Files are grouped into assets by name; sub-folders are scanned | `exclude` (folder names), `max_depth` (default 8), `real_scale` |
 | `splat_pack` | a finished Gaussian-splat pack: flat, or one folder per asset. Training datasets and work folders are skipped | `depth`, `layers`, `preview_prefer`, `tags`, `strip`, `pack` |
 | `manifest` | folders that follow `ASSET_FORMAT.md` (one `asset.json` per asset) | |
+| `fab` | the free Quixel Megascans catalogue on Fab, browsed without downloading it; files are pulled on demand into `path` | `tier` (default download quality: `low`, `mid`, `high`, `raw`) |
 
 - `real_scale` (splats) points at a JSON of `{"AssetName": largest_side_in_metres}`; a `real_scale.json` in the
   library root is picked up without it.
@@ -200,6 +201,7 @@ server/bridge2.py                               HTTP routes, App (config, scans,
    ├── send.py       asset + options -> payload (resolution / LOD / variation / splat format), TCP client
    ├── jobs.py       one lifecycle for every background job (see STATE_MACHINES.md)
    ├── health.py     library health report      tagging.py  smart tags     splats.py  splat headers
+   ├── fab.py        the remote Fab library (index, thumbnails, pull, evict)
    │  TCP, one JSON line each way ("bridge2/1")
    ├── c4d/Bridge2/bridge2.pyp        receiver: socket thread -> main-thread job queue, menu command
    │   c4d/Bridge2/bridge2_import.py  importer: geometry, Octane / Standard materials, HDRIs, splats (reloaded per send)
@@ -283,6 +285,7 @@ map of job kinds, receiver states and UI state is in `STATE_MACHINES.md`.
 
 `bridge2.db` (the catalogue), `thumbs/` (card WebPs), `renders/` (Blender-rendered previews for models
 without one), `splat_conv/` (converted splats), `server.log`.
+`fab/index.json` and `fab/thumbs/` belong to the Fab library.
 
 ### B.7 Security model
 
@@ -312,7 +315,18 @@ TCP connection to localhost can use it, as with any local dev server.
 | POST | `/api/favorite`, `/api/label`, `/api/remove`, `/api/restore` | favourites, labels, take out of / back into the library (files are never touched) |
 | POST | `/api/health/run`, `/api/health/action` | re-run the health check, act on an issue |
 | POST | `/api/reveal` `{id}` | show the asset in Explorer |
+| GET | `/api/fab/files?id=`, `/api/fab/index` | a Fab asset's quality tiers and what's on disk; index state |
+| POST | `/api/fab/pull` `{id, tier}`, `/api/fab/evict` `{id}`, `/api/fab/index` | download, free up space, re-crawl (jobs) |
 
+### B.9 The Fab library
+
+`server/fab.py` crawls Fab's public listing search for the free Quixel Megascans listings into
+`cache/fab/index.json` and serves each as a *remote* asset (virtual path `fab://<uid>`, thumbnail only).
+A pull downloads one quality tier into `<library path>\<type>\<Title>_<id>\` with a `fab.json` beside it;
+from then on it is a normal local Megascans asset with the same id. An evict deletes that folder again.
+The state lives on disk (a folder with `fab.json` is local), so a scan always derives it. It relies on
+Fab's website endpoints, which aren't a documented API and can change; if pulls start failing, check
+`files_for()` and `_download_url()` first. Respect Fab's terms and each asset's licence.
 
 ---
 
@@ -372,6 +386,7 @@ starts it. Add the kind to the table in `STATE_MACHINES.md`.
 ```powershell
 py -3 tools\test_jobs.py      # the job state machine
 py -3 tools\test_packs.py     # splat packs and layered payloads
+py -3 tools\test_fab.py       # the Fab library (offline; --live pulls one small real asset)
 ```
 
 Each exits 0 and prints `all passed`.

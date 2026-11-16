@@ -47,6 +47,10 @@ Desktop app / browser  ──HTTP 127.0.0.1:8642──▶  server/  (scan, index
   Each app gets a format it can read; anything else is converted on the fly (needs Node.js). Splat
   packs can pair several layers (for example a volume and a star field) into one asset that imports
   as one object per layer.
+- **The Megascans catalogue on Fab, without downloading it:** a `fab` library indexes every free Quixel
+  Megascans listing on Fab (title, tags, category, thumbnail) so it can be searched like everything
+  else. An asset's files are downloaded only when you need them (Download, Get, or any send), at the
+  quality you pick, and **Free up space** deletes them again.
 - **Library health:** missing files, broken previews, duplicates, models without meshes or previews,
   splats without a proxy or real size, and more, each with a jump to the affected assets.
 - **Jobs you can watch:** scans, renders, conversions and sends are jobs with one lifecycle. The status

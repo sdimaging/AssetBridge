@@ -40,6 +40,8 @@ These are opened with `jobs.open()` and moved on by their caller. For example, a
 | `health` | none | queue | first view, Check again, the end of a scan, clearing the splat cache | the report is written (`/api/health` still returns it, plus `job`) |
 | `convert` | output path | join (runs inline in the send) | a send that needs a PLY↔SPZ conversion | the converted file exists; two sends of the same splat share one conversion |
 | `send` | asset + target + options | join (runs inline in the request) | `POST /api/send` | the receiver replies; a refused or failed import is `failed`, and the full reply is in `result` |
+| `fab_index` | none | join | `POST /api/fab/index`, or the first start with a Fab library and no index | `cache/fab/index.json` is rewritten from Fab's listing search; then every Fab library is rescanned |
+| `fab_pull` | asset id | join (inline when a send needs it) | `POST /api/fab/pull`, the card's Get, or a send of a remote asset | the zip is downloaded (3 at a time), extracted and indexed; the asset is local under the same id. Progress = MB downloaded |
 
 ## For agents: watching and waiting
 
@@ -56,6 +58,7 @@ Every route that starts work returns the job that will answer it:
 - `/api/health/run` returns `{"ok": true, "job": "health-N"}`.
 - `/api/restore` returns `{"ok": true, "rescan": [...], "jobs": ["scan-N"]}`.
 - `/api/send` adds `"job"`.
+- `/api/fab/pull` returns `{"ok": true, "job": "fab_pull-N", "joined": <bool>}`; `/api/fab/index` returns `{"ok": true, "job": "fab_index-N"}`.
 
 The pattern is: start it, take the job id, then `GET /api/jobs/<id>?wait=...` until `state` is `succeeded`, `failed` or `cancelled`. Jobs live in memory, so a AssetBridge restart clears the history; the files on disk are the lasting result.
 
@@ -74,6 +77,18 @@ queued → running → done        (or queued → abandoned)
 - AssetBridge waits 620 s (`SEND_TIMEOUT`), longer than the receivers, so their own timeout reply reaches the user.
 
 **Selection ownership** (`bridge2_import.py`): `state["auto_selected"]` and `state["auto_dirty"]` record "the receiver selected this, the user hasn't touched anything since". Geometry, splat, instance and HDRI imports all record it. Before, HDRI did not, and the next material send landed on the sky.
+
+## Fab assets: remote → local (`server/fab.py`)
+
+```
+remote (fab://<uid>, thumbnail only) ──pull──> local (files in the library folder + fab.json)
+            ^                                              │
+            └──────────────── evict (Free up space) ───────┘
+```
+
+- The state is on disk: a folder with `fab.json` is local; every other indexed listing is remote. A scan derives it.
+- The asset id never changes (`<library>:<listing uid>`), so favourites, labels and send history survive pulls and evictions.
+- Evict refuses while a pull of the same asset runs, and only deletes a folder inside the library that has a `fab.json`.
 
 
 ## Web UI (`web/app.js`)
