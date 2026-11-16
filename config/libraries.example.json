@@ -1,0 +1,11 @@
+{
+  "libraries": [
+    {"name": "Megascans", "kind": "megascans", "path": "D:\\Megascans Library", "enabled": true},
+    {"name": "Poly Haven", "kind": "generic", "path": "D:\\Assets\\Poly Haven", "enabled": true},
+    {"name": "Poliigon", "kind": "generic", "path": "D:\\Assets\\Poliigon", "enabled": true},
+    {"name": "Downloads", "kind": "generic", "path": "D:\\3D\\Downloads", "exclude": ["Poliigon"], "enabled": true},
+    {"name": "Splats", "kind": "generic", "path": "D:\\Splats", "real_scale": "D:\\Splats\\real_scale.json", "enabled": true},
+    {"name": "Splat Pack", "kind": "splat_pack", "path": "D:\\Splats\\Packs\\Clouds", "depth": 1,
+     "layers": ["Volume", "Points"], "preview_prefer": ["thumb_both", "thumb_volume"], "tags": ["clouds"], "enabled": true}
+  ]
+}

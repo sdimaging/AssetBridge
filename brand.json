@@ -1,0 +1,21 @@
+{
+  "name": "AssetBridge",
+  "wordmark": "ASSETBRIDGE",
+  "wordmark_accent_letter": -1,
+  "exe_name": "AssetBridge",
+  "app_id": "AssetBridge.App",
+  "publisher": "",
+  "accent": "teal",
+  "icon_svg": "icons/mark.svg",
+  "manifest": "asset.json",
+  "format_name": "Asset Format",
+  "ports": {
+    "web": 8642,
+    "c4d": 24981,
+    "blender": 24982
+  },
+  "c4d": {
+    "command_id": 1000008,
+    "receiver_id": 1000007
+  }
+}

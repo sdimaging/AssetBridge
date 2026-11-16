@@ -1,0 +1,10 @@
+# machine-specific: your libraries, the index, thumbnails, logs
+config/libraries.json
+cache/
+dist/
+# written by tools/apply_brand.py for your brand name
+/*.bat
+__pycache__/
+*.pyc
+*.tmp
+tools/node_modules/

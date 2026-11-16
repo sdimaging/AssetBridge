@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{NAME}}</title>
+<link rel="icon" href="/web/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/web/app.css">
+<script type="importmap">{ "imports": { "three": "/web/vendor/three/build/three.module.js", "three/addons/": "/web/vendor/three/examples/jsm/" } }</script>
+<script>{ const d = (window.BRAND && window.BRAND.accent) || "teal"; try { document.documentElement.dataset.accent = JSON.parse(localStorage.getItem("bridge2.accent")) || d; } catch (e) { document.documentElement.dataset.accent = d; } }</script>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand">
+      <img src="/web/icon.svg" width="28" height="28" alt="">
+      <span class="wordmark">{{WORDMARK}}</span>
+    </div>
+
+    <nav class="nav-section">
+      <div class="nav-title">Browse</div>
+      <button class="nav-item" data-view="all"><i class="ic ic-grid"></i><span>All assets</span><em id="count-all"></em></button>
+      <button class="nav-item" data-view="fav"><i class="ic ic-star"></i><span>Favorites</span><em id="count-fav"></em></button>
+      <button class="nav-item" data-view="recent"><i class="ic ic-clock"></i><span>Recently sent</span><em id="count-recent"></em></button>
+      <button class="nav-item" data-view="health"><i class="ic ic-health"></i><span>Library health</span><em id="count-health"></em></button>
+    </nav>
+
+    <nav class="nav-section">
+      <div class="nav-title">Type</div>
+      <div id="type-list"></div>
+    </nav>
+
+    <nav class="nav-section" id="sec-labels" hidden>
+      <div class="nav-title">Labels</div>
+      <div id="label-list"></div>
+    </nav>
+
+    <nav class="nav-section" id="sec-saved" hidden>
+      <div class="nav-title">Saved filters</div>
+      <div id="saved-list"></div>
+    </nav>
+
+    <nav class="nav-section grow">
+      <div class="nav-title">Libraries <button class="mini" id="btn-add-lib" title="Add a library folder">+ Add</button></div>
+      <div id="lib-list"></div>
+    </nav>
+
+    <div class="side-foot">
+      <div class="theme-row"><span>Accent</span><div class="swatches-theme" id="theme-swatches"></div></div>
+      <div class="status" id="c4d-status" title="Cinema 4D receiver"><span class="dot"></span><span class="txt">Cinema 4D…</span></div>
+      <div class="status" id="blender-status" title="Blender receiver"><span class="dot"></span><span class="txt">Blender…</span></div>
+      <div class="status" id="scan-status"><span class="spin"></span><span class="txt"></span></div>
+      <button class="ghost wide" id="btn-rescan"><i class="ic ic-refresh"></i> Rescan libraries</button>
+      <button class="ghost wide" id="btn-removed" hidden><i class="ic ic-trash"></i> Removed items <em id="count-removed"></em></button>
+    </div>
+  </aside>
+
+  <main id="main">
+    <header id="toolbar">
+      <div class="search">
+        <i class="ic ic-search"></i>
+        <input id="q" type="search" placeholder="Search names, tags, categories…" autocomplete="off" spellcheck="false">
+        <kbd>/</kbd>
+      </div>
+      <div class="tool-group">
+        <div class="color-filter">
+          <button id="btn-filters" class="ghost" title="Filter by maps, resolution, format"><i class="ic ic-filter"></i><span>Filters</span><em id="filter-count"></em></button>
+          <div class="popover wide" id="filter-pop" hidden></div>
+        </div>
+        <div class="color-filter">
+          <button id="btn-color" class="ghost" title="Sort by color"><span class="swatch" id="color-swatch"></span><span>Color</span></button>
+          <div class="popover" id="color-pop" hidden>
+            <div class="swatches" id="swatches"></div>
+            <div class="pop-row"><input type="color" id="color-custom" value="#7a6a55"><button class="mini" id="color-clear">Clear</button></div>
+          </div>
+        </div>
+        <select id="sort" title="Sort">
+          <option value="name">Name</option>
+          <option value="newest">Newest</option>
+          <option value="used">Recently used</option>
+          <option value="type">Type</option>
+          <option value="relevance">Relevance</option>
+        </select>
+        <input type="range" id="size" min="120" max="320" step="10" value="180" title="Thumbnail size">
+      </div>
+    </header>
+    <div id="crumbs"><span id="result-count"></span><span id="active-filters"></span></div>
+    <section id="health" hidden></section>
+    <section id="grid-wrap">
+      <div id="grid" role="listbox" aria-label="Assets"></div>
+      <div id="sentinel"></div>
+      <div id="empty" hidden>
+        <div class="empty-art"></div>
+        <h3>No assets here</h3>
+        <p id="empty-msg">Try a different search, or add a library folder.</p>
+      </div>
+    </section>
+  </main>
+
+  <aside id="detail" hidden>
+    <button class="icon-btn close" id="detail-close" title="Close (Esc)"><i class="ic ic-x"></i></button>
+    <div class="hero" id="d-hero">
+      <img id="d-img" alt="">
+      <div class="viewer" id="d-viewer" hidden></div>
+      <div class="hero-tabs" role="tablist"><button id="t-image" class="on">Image</button><button id="t-3d">3D</button></div>
+      <div class="vbar" id="d-vbar" hidden></div>
+      <div class="vbar" id="d-views" hidden></div>
+      <div class="vstatus" id="d-vstatus" hidden></div>
+    </div>
+    <div class="d-body">
+      <div class="d-head">
+        <h2 id="d-name"></h2>
+        <button class="icon-btn" id="d-fav" title="Favorite (F)"><i class="ic ic-star"></i></button>
+      </div>
+      <div class="d-meta" id="d-meta"></div>
+      <div class="chips" id="d-maps"></div>
+      <div class="labels" id="d-labels"></div>
+
+
+      <div class="opts" id="d-opts">
+        <div class="opt" id="o-splatmode"><label>Bring in</label><div class="seg" data-key="splat_mode"></div></div>
+        <div class="opt" id="o-layers"><label>Layers (one splat each, imported together)</label><div class="seg multi"></div></div>
+        <div class="opt" id="o-res"><label>Resolution</label><div class="seg" data-key="resolution"></div></div>
+        <div class="opt" id="o-lod"><label>LOD</label><div class="seg" data-key="lod"></div></div>
+        <div class="opt" id="o-var"><label>Variations</label><div class="seg multi" data-key="variations"></div></div>
+        <div class="opt" id="o-renderer"><label>Material</label><div class="seg" data-key="renderer"></div></div>
+        <div class="toggles">
+          <label class="tg" id="o-instance"><input type="checkbox" data-key="instance"><span></span>Instance it if it's already in the scene</label>
+          <label class="tg" id="o-realscale"><input type="checkbox" data-key="real_scale"><span></span>Real-world scale (bakes a scaled copy)</label>
+          <label class="tg" id="o-fastvp"><input type="checkbox" data-key="fast_viewport"><span></span>Fast C4D viewport (shows 1 in 8 splats)</label>
+          <label class="tg" id="o-env"><input type="checkbox" data-key="replace_environment"><span></span>Replace current HDRI environment</label>
+          <label class="tg" id="o-native"><input type="checkbox" data-key="use_native"><span></span>Use bundled C4D scene</label>
+          <label class="tg" id="o-disp"><input type="checkbox" data-key="displacement"><span></span>Displacement</label>
+          <label class="tg" id="o-ao"><input type="checkbox" data-key="ao"><span></span>Multiply AO into albedo</label>
+          <label class="tg" id="o-sel"><input type="checkbox" data-key="apply_to_selection"><span></span>Apply to selected objects</label>
+          <label class="tg" id="o-exr"><input type="checkbox" data-key="disp_exr"><span></span>EXR displacement</label>
+        </div>
+      </div>
+
+      <div class="send-row">
+        <button class="send" id="d-send" title="Send to Cinema 4D (Enter)"><i class="ic ic-send"></i><span>Cinema 4D</span><kbd>Enter</kbd></button>
+        <button class="send alt" id="d-send-b" title="Send to Blender (Shift+Enter)"><i class="ic ic-send"></i><span>Blender</span><kbd>⇧↵</kbd></button>
+      </div>
+      <div class="d-result" id="d-result" hidden></div>
+      <div class="d-actions">
+        <button class="ghost" id="d-reveal"><i class="ic ic-folder"></i> Show in Explorer</button>
+        <button class="ghost" id="d-copy"><i class="ic ic-copy"></i> Copy path</button>
+        <button class="ghost danger" id="d-remove" title="Remove from the library (Delete) - files on disk are kept"><i class="ic ic-trash"></i> Remove</button>
+      </div>
+      <div class="tags" id="d-tags"></div>
+    </div>
+  </aside>
+</div>
+
+<dialog id="lib-dialog">
+  <form method="dialog" id="lib-form">
+    <h3>Add a library</h3>
+    <p class="muted">Any folder works — Megascans libraries are detected automatically. Loose models, Poliigon downloads and texture sets are grouped into assets by file name.</p>
+    <label>Name<input name="libname" required placeholder="e.g. Poliigon, Kitbash, Client props"></label>
+    <label>Folder
+      <div class="row"><input name="libpath" required placeholder="D:\Assets\Poliigon"><button type="button" class="ghost" id="btn-browse">Browse…</button></div>
+    </label>
+    <label>Kind
+      <select name="libkind"><option value="">Auto-detect</option><option value="megascans">Megascans library</option><option value="generic">Generic folder</option></select>
+    </label>
+    <div class="err" id="lib-err" hidden></div>
+    <div class="row end"><button type="button" class="ghost" id="lib-cancel">Cancel</button><button type="submit" class="primary" value="ok">Add & index</button></div>
+  </form>
+</dialog>
+
+<dialog id="del-dialog">
+  <form method="dialog">
+    <h3 id="del-title">Remove from the library?</h3>
+    <p class="muted" id="del-text"></p>
+    <p class="muted">This erases the entry from the {{NAME}} library permanently. The files on disk are <b>not</b> deleted.</p>
+    <div class="row end"><button type="button" class="ghost" id="del-cancel">Cancel</button><button type="button" class="primary danger" id="del-ok">Remove</button></div>
+  </form>
+</dialog>
+
+<dialog id="removed-dialog">
+  <form method="dialog">
+    <h3>Removed items</h3>
+    <p class="muted">Assets you removed from the library. Restore brings one back on the next scan of its library.</p>
+    <div id="removed-list" class="removed-list"></div>
+    <div class="row end"><button type="button" class="ghost" id="removed-all">Restore all</button><button type="button" class="primary" id="removed-close">Done</button></div>
+  </form>
+</dialog>
+
+<div id="lightbox" hidden>
+  <button class="icon-btn lb-close" id="lb-close" title="Close (Esc)"><i class="ic ic-x"></i></button>
+  <img id="lb-img" alt="">
+  <div class="lb-bar"><button class="ghost" id="lb-prev">‹</button><span id="lb-label"></span><button class="ghost" id="lb-next">›</button></div>
+</div>
+<div id="multibar" hidden>
+  <span id="multi-count"></span>
+  <input id="multi-label" list="label-options" placeholder="Add a label…" autocomplete="off">
+  <button class="primary" id="multi-apply">Label</button>
+  <button class="ghost danger" id="multi-remove"><i class="ic ic-trash"></i> Remove</button>
+  <button class="ghost" id="multi-clear">Clear selection</button>
+</div>
+<datalist id="label-options"></datalist>
+<div id="toasts" aria-live="polite"></div>
+<script src="/web/app.js"></script>
+</body>
+</html>
