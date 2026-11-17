@@ -319,6 +319,38 @@ def _apply_sets(meshes, sets, name, asset, opts):
 
 # ------------------------------------------------------------------ materials
 
+# Texture colour spaces by role, resolved against the OCIO config Blender runs with (its own, or an ACES / studio
+# config through $OCIO): the first name the config knows wins. Hard-coding "sRGB" / "Non-Color" breaks imports
+# under configs that don't have those names.
+CS_NAMES = {
+    "color": ("sRGB", "sRGB - Texture", "Utility - sRGB - Texture", "srgb_texture", "Input - Generic - sRGB - Texture",
+              "sRGB Encoded Rec.709 (sRGB)"),
+    "linear": ("Linear Rec.709", "Linear Rec.709 (sRGB)", "Utility - Linear - sRGB", "lin_srgb", "Linear"),
+    "data": ("Non-Color", "Raw", "Utility - Raw", "raw", "Data"),
+}
+FLOAT_EXT = (".exr", ".hdr")
+_cs_found = {}
+
+
+def set_colorspace(img, role):
+    """Give img the colour space for role "color" (an 8/16-bit sRGB texture), "linear" (a float EXR/HDR colour
+    map) or "data" (normal, roughness, displacement ...). Returns the name used. When the config has none of the
+    names, data maps are flagged is_data (works under any config) and colour maps keep Blender's default for the
+    file type, which is already right for sRGB 8-bit and linear float files."""
+    settings = img.colorspace_settings
+    known = _cs_found.get(role)
+    for name in ((known,) if known else ()) + tuple(n for n in CS_NAMES[role] if n != known):
+        try:
+            settings.name = name
+        except TypeError:  # not in this OCIO config
+            continue
+        _cs_found[role] = name
+        return name
+    if role == "data":
+        settings.is_data = True
+    return None
+
+
 def _lin(c):
     c = c / 255.0
     return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
@@ -357,7 +389,7 @@ def build_material(mat_name, maps, asset, opts, values=None):
         n = N.new("ShaderNodeTexImage")
         n.label = kind.capitalize()
         n.image = bpy.data.images.load(path, check_existing=True)
-        n.image.colorspace_settings.name = "sRGB" if color else "Non-Color"
+        set_colorspace(n.image, "data" if not color else "linear" if path.lower().endswith(FLOAT_EXT) else "color")
         n.location = (-700, row[0])
         row[0] -= 290
         return n

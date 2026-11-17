@@ -29,8 +29,10 @@ Desktop app / browser  ──HTTP 127.0.0.1:8642──▶  server/  (scan, index
   custom labels, filters (maps, minimum resolution, format, proxy, …) and saved views. Ctrl+click
   selects several cards.
 - **Preview in 3D:** spin models, splats, surfaces and HDRIs in the detail panel, view each map on its
-  own (normal, roughness, AO …), or open any map full size. Models that only ship a texture swatch get
-  a rendered thumbnail (Blender, in the background).
+  own (normal, roughness, AO …), or open any map full size. GLB, FBX and OBJ load directly; USD and
+  Alembic are converted once in the background by Blender and cached. Animated models play (glTF, FBX,
+  and USD / Alembic transform animation), with Play/Pause and a clip menu. Models that only ship a
+  texture swatch get a rendered thumbnail (Blender, in the background).
 - **Send to Cinema 4D:** geometry at the LOD and resolution you pick, Octane Universal materials (C4D
   Standard when Octane isn't installed), HDRIs as Octane environments, splats as Octane Gaussian Splat
   objects with an optional proxy mesh. Sending the same asset again adds an instance. Several Cinema 4D
@@ -51,6 +53,13 @@ Desktop app / browser  ──HTTP 127.0.0.1:8642──▶  server/  (scan, index
   Megascans listing on Fab (title, tags, category, thumbnail) so it can be searched like everything
   else. An asset's files are downloaded only when you need them (Download, Get, or any send), at the
   quality you pick, and **Free up space** deletes them again.
+- **Colour spaces that follow your OCIO config:** every texture is imported as sRGB colour, linear colour
+  (EXR / HDR) or non-colour data. In Blender the names come from whatever OCIO config it runs with (its
+  own, ACES, or a studio config through `$OCIO`), so imports don't break under a custom config.
+- **Light on memory:** the catalogue lives in SQLite on disk, and the server streams files without holding
+  them (about 100 MB with 25,000 assets indexed). The grid keeps only the rows near the screen however
+  far you scroll, and closing the 3D preview hands its RAM and GPU memory back. Closing the window
+  frees the rest; the server keeps running for sends.
 - **Library health:** missing files, broken previews, duplicates, models without meshes or previews,
   splats without a proxy or real size, and more, each with a jump to the affected assets.
 - **Jobs you can watch:** scans, renders, conversions and sends are jobs with one lifecycle. The status
@@ -108,6 +117,16 @@ cache/                      index, thumbnails, converted splats, logs (safe to d
 
 `STATE_MACHINES.md` maps every background job and state, `ASSET_FORMAT.md` describes an optional standard
 folder layout with a per-asset `asset.json` manifest, and `AGENTS.md` is the developer guide.
+
+## Roadmap and suggestions
+
+[`ROADMAP.md`](ROADMAP.md) lists what's being considered, each item with where to start in the code.
+Suggestions are welcome: open an issue with the *Feature request* form, or a pull request that adds a line
+to the roadmap. To work on something, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+The repository is set up for coding agents: point Claude Code, Codex or Cursor at it and ask for a roadmap
+item. [`AGENTS.md`](AGENTS.md) gives the agent the map, the recipes and the checks, and `py -3 tools\check.py`
+verifies a change in one command.
 
 ## Licence
 

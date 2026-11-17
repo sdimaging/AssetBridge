@@ -40,6 +40,7 @@ These are opened with `jobs.open()` and moved on by their caller. For example, a
 | `health` | none | queue | first view, Check again, the end of a scan, clearing the splat cache | the report is written (`/api/health` still returns it, plus `job`) |
 | `convert` | output path | join (runs inline in the send) | a send that needs a PLY↔SPZ conversion | the converted file exists; two sends of the same splat share one conversion |
 | `send` | asset + target + options | join (runs inline in the request) | `POST /api/send` | the receiver replies; a refused or failed import is `failed`, and the full reply is in `result` |
+| `preview_mesh` | source file version (path, mtime, size) | join (runs inline in the request) | `POST /api/preview-mesh`, when a USD or Alembic asset opens in 3D | Blender writes `cache/preview_mesh/<key>.glb` (transform animation baked to keys); a second viewer of the same file waits for the same job |
 | `fab_index` | none | join | `POST /api/fab/index`, or the first start with a Fab library and no index | `cache/fab/index.json` is rewritten from Fab's listing search; then every Fab library is rescanned |
 | `fab_pull` | asset id | join (inline when a send needs it) | `POST /api/fab/pull`, the card's Get, or a send of a remote asset | the zip is downloaded (3 at a time), extracted and indexed; the asset is local under the same id. Progress = MB downloaded |
 
@@ -94,6 +95,8 @@ remote (fab://<uid>, thumbnail only) ──pull──> local (files in the libra
 ## Web UI (`web/app.js`)
 
 - **Grid paging:** `S.gen` is the generation, and `reload()` always releases `S.loading`. An in-flight page from an old generation can no longer freeze the grid.
+- **Windowed grid:** `S.items` holds every record loaded so far; only rows `WIN.lo`…`WIN.hi` (the viewport plus `BUFFER_ROWS` each side) exist as cards, and `#grid` padding stands in for the rest. A card is rebuilt from its record whenever it scrolls back in, so anything that changes a card (favourite, a Fab download landing) updates the record in `S.items` too.
+- **3D viewer:** one `Viewer` while the 3D preview is open. Closing the panel, switching to Image, or opening a remote asset calls `release3D()`, which disposes the scene, textures, splat sorter and WebGL context; the next 3D preview builds a new viewer.
 - **Status pill:** responses are applied newest-first. It shows "AssetBridge server not responding…" when the server is unreachable, and shows active jobs (previews, promo, edition, SPZ, conversion) when no scan is running. Hovering lists every active job.
 - **Sends:** `S.sending` holds `"<id>|<target>"` for each send in flight, and the buttons are derived from it. Re-rendering the panel can't reset them, and the same send can't start twice. The server's `send` job `join` policy backs this up.
 - **Detail image:** refreshes when the preview's `tv` changes, for example after a save, not only when the asset changes.
@@ -111,4 +114,5 @@ These are small, local, and either can't run twice or can be recomputed from dis
 
 ## Tests
 
+- `py -3 tools/check.py`: everything below that doesn't need a running app (compile, `node --check`, every `tools/test_*.py`).
 - `py -3.13 tools/test_jobs.py`: the job state machine. It covers the legal and illegal transitions, the queue/merge and join policies, scope widening, wait timeouts, deadlines, inline joins, cancelling, and a 200-run double-start race.

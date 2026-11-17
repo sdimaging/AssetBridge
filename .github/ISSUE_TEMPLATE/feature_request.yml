@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest something for the roadmap
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks! Check ROADMAP.md first; if it's already there, comment on why it matters to you.
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like to do?
+      description: Describe the task, not the solution, for example "pick a USD variant before sending".
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Browsing and search
+        - 3D preview
+        - Cinema 4D import
+        - Blender import
+        - Libraries and vendors
+        - File formats
+        - Colour management
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Your setup and workflow
+      description: Apps and versions, renderer, the kind of assets, anything that helps.
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Contributing
+      options:
+        - label: I'd like to work on this (with or without a coding agent)

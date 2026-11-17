@@ -1,0 +1,33 @@
+name: Bug report
+description: Something doesn't work as described
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Which asset or library kind, which button, which app.
+      placeholder: |
+        1. Add a generic library with ...
+        2. Open the asset in 3D
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Windows, Python, Cinema 4D (and Octane), Blender
+      placeholder: Windows 11, Python 3.13, Cinema 4D 2026.1 + Octane 2026, Blender 5.2
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: The last 40 lines of cache\server.log, and any error in the browser console (F12).
+      render: shell

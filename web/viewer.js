@@ -11,7 +11,22 @@ const BG = 0x1f1f21;
 const EXT_RANK = { jpg: 0, jpeg: 0, png: 1, webp: 1, tif: 2, tiff: 2, tga: 3, bmp: 3, exr: 4, hdr: 4 };
 const resNum = (r) => parseInt(r || "0", 10) || 0;
 const COLOR_MAPS = new Set(["albedo", "translucency", "specular", "emission"]);
+const CONVERT = ["usdz", "usd", "usdc", "usda", "abc"];  // previewed through a server-side GLB conversion
+
+// Some files' clips carry a broken track (an FBX rotation curve that loads with the wrong number of values).
+// Playing one gives the model a NaN transform and it vanishes, so only well-formed tracks are kept.
+const TRACK_SIZE = { quaternion: 4, position: 3, scale: 3 };  // getValueSize() is derived from the data, so it can't tell
+function saneClips(clips) {
+  const ok = (t) => {
+    const n = t.times.length, want = TRACK_SIZE[t.name.split(".").pop()];
+    return n > 0 && (want ? t.values.length === n * want : t.values.length % n === 0) && !t.values.some(Number.isNaN);
+  };
+  return (clips || []).map((c) => { c.tracks = c.tracks.filter(ok); return c; })
+    .filter((c) => c.tracks.length && c.duration > 0);
+}
 let sparkMod = null;
+// Releasing the viewer mid-sort makes Spark reject that sort with "Worker terminate": expected, not an error
+window.addEventListener("unhandledrejection", (e) => { if (e.reason && e.reason.message === "Worker terminate") e.preventDefault(); });
 
 export class Viewer {
   constructor(host) {
@@ -39,10 +54,18 @@ export class Viewer {
     this.textures = {};
     this.channel = "lit";
     this.token = 0;
-    new ResizeObserver(() => this.resize()).observe(host);
+    this.mixer = null;
+    this.clips = [];
+    this.playing = false;
+    this.timer = new THREE.Timer();
+    this.ro = new ResizeObserver(() => this.resize());
+    this.ro.observe(host);
+    if (window.APP_DEBUG) window.viewer = this;  // ?debug=1: inspect the live viewer from the console or a test
     this.resize();
-    this.renderer.setAnimationLoop(() => {
+    this.renderer.setAnimationLoop((t) => {
+      this.timer.update(t);
       if (!this.host.isConnected || this.host.offsetParent === null) return;
+      if (this.mixer && this.playing) this.mixer.update(Math.min(this.timer.getDelta(), 0.1));
       this.controls.update();
       this.renderer.render(this.scene, this.camera);
     });
@@ -57,6 +80,8 @@ export class Viewer {
 
   clear() {
     this.token++;
+    if (this.mixer) { this.mixer.stopAllAction(); this.mixer.uncacheRoot(this.mixer.getRoot()); }
+    this.mixer = null; this.clips = []; this.playing = false;
     this.root.traverse((o) => {
       if (o.geometry) o.geometry.dispose();
       const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
@@ -260,32 +285,48 @@ export class Viewer {
   }
 
   // ---------------------------------------------------------------- meshes
+  // The browser reads GLB/glTF, FBX and OBJ itself. USD and Alembic go through the server, which converts them
+  // once to a GLB (Blender, in the background) and caches it.
   pickMesh(files) {
-    const order = ["glb", "gltf", "fbx", "obj"];
+    const order = ["glb", "gltf", "fbx", "obj", ...CONVERT];
     const meshes = files.filter((f) => f.role === "mesh" && order.includes(f.kind) && !f.proxy);
     if (!meshes.length) return null;
     const lodN = (f) => { const m = /LOD(\d+)/i.exec(f.lod || ""); return m ? +m[1] : (f.lod === "High" ? -1 : 0); };
+    const conv = (f) => (CONVERT.includes(f.kind) ? 1 : 0);
     // a mid LOD previews fast and still looks like the asset; per-res variants (Poly Haven): smallest
     return meshes.slice().sort((a, b) => {
       const la = lodN(a), lb = lodN(b);
       const pa = la >= 0 ? Math.abs(la - 2) : 9, pb = lb >= 0 ? Math.abs(lb - 2) : 9;
-      return pa - pb || resNum(a.res) - resNum(b.res) || order.indexOf(a.kind) - order.indexOf(b.kind);
+      return conv(a) - conv(b) || pa - pb || resNum(a.res) - resNum(b.res) || order.indexOf(a.kind) - order.indexOf(b.kind);
     })[0];
+  }
+
+  async converted(asset, f, onStatus) {
+    onStatus("Converting " + f.kind.toUpperCase() + " for the preview (Blender, first time only)…");
+    const r = await fetch("/api/preview-mesh", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: asset.id, idx: f.idx }) }).then((x) => x.json());
+    if (!r.ok) throw new Error(r.error || "Couldn't convert " + f.name + " for the preview");
+    return { ...f, kind: "glb", url: r.url };
   }
 
   async loadModel(f) {
     const mgr = new THREE.LoadingManager();
     mgr.setURLModifier((u) => (/\.(jpe?g|png|tga|tiff?|bmp|exr|dds|psd)(\?|$)/i.test(u) && !u.includes("/asset-file/")) ? "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=" : u);
-    if (f.kind === "fbx") return await new FBXLoader(mgr).loadAsync(f.url);
-    if (f.kind === "obj") return await new OBJLoader(mgr).loadAsync(f.url);
-    return (await new GLTFLoader(mgr).loadAsync(f.url)).scene;
+    if (f.kind === "fbx") { const o = await new FBXLoader(mgr).loadAsync(f.url); return { obj: o, clips: saneClips(o.animations) }; }
+    if (f.kind === "obj") return { obj: await new OBJLoader(mgr).loadAsync(f.url), clips: [] };
+    const g = await new GLTFLoader(mgr).loadAsync(f.url);
+    return { obj: g.scene, clips: saneClips(g.animations) };
   }
 
   async showMesh(asset, files, tok, onStatus) {
-    const f = this.pickMesh(files);
-    if (!f) throw new Error(asset.native ? "This asset ships only a .c4d scene, so there's no mesh to preview" : "No previewable mesh (GLB, FBX or OBJ)");
+    let f = this.pickMesh(files);
+    if (!f) throw new Error(asset.native ? "This asset ships only a .c4d scene, so there's no mesh to preview" : "No previewable mesh (GLB, FBX, OBJ, USD or Alembic)");
+    if (CONVERT.includes(f.kind)) {
+      f = await this.converted(asset, f, onStatus);
+      if (tok !== this.token) return;
+    }
     onStatus("Loading " + f.kind.toUpperCase() + (f.lod ? " " + f.lod : "") + "…");
-    const [obj] = await Promise.all([this.loadModel(f), this.loadMaps(files, f.lod, tok)]);
+    const [{ obj, clips }] = await Promise.all([this.loadModel(f), this.loadMaps(files, f.lod, tok)]);
     if (tok !== this.token) return;
     const parts = files.filter((x) => x.role === "part_map");
     const partTex = {};
@@ -329,7 +370,23 @@ export class Viewer {
     if (tok !== this.token) return;
     this.root.add(obj);
     this.frame(obj);
+    if (clips.length) {
+      this.mixer = new THREE.AnimationMixer(obj);
+      this.clips = clips;
+      this.playClip(0);
+    }
   }
+
+  // ---------------------------------------------------------------- animation (glTF / FBX clips)
+  playClip(i) {
+    if (!this.mixer || !this.clips[i]) return;
+    this.mixer.stopAllAction();
+    this.mixer.clipAction(this.clips[i]).reset().play();
+    this.clip = i;
+    this.playing = true;
+  }
+
+  setPlaying(on) { this.playing = !!on && !!this.mixer; }
 
   // ---------------------------------------------------------------- surfaces / atlases / decals
   async showSurface(asset, files, tok) {
@@ -369,9 +426,21 @@ export class Viewer {
     this.controls.update();
   }
 
+  // Hand everything back: scene, textures, the splat sorter and the WebGL context itself. The app calls this when
+  // the 3D preview closes and builds a new viewer the next time one opens.
   dispose() {
     this.clear();
     this.renderer.setAnimationLoop(null);
+    this.ro.disconnect();
+    this.controls.dispose();
+    if (this.spark) {
+      this.scene.remove(this.spark);
+      try { if (this.spark.dispose) this.spark.dispose(); } catch (e) { /* nothing more to free */ }
+      this.spark = null;
+    }
+    this.roomEnv.dispose();
     this.renderer.dispose();
+    this.renderer.forceContextLoss();
+    this.renderer.domElement.remove();
   }
 }

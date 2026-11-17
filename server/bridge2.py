@@ -43,6 +43,8 @@ WEB = os.path.join(ROOT, "web")
 CACHE = os.path.join(ROOT, "cache")
 THUMBS = os.path.join(CACHE, "thumbs")
 RENDERS = os.path.join(CACHE, "renders")  # static 3D renders for models whose preview is only a texture (tools/render_previews.py)
+PREVIEW_MESH = os.path.join(CACHE, "preview_mesh")  # USD / Alembic converted to GLB for the 3D preview (tools/preview_mesh.py)
+PREVIEW_CONVERT = ("usd", "usda", "usdc", "usdz", "abc")
 
 
 def find_blender(cfg):
@@ -294,6 +296,39 @@ class App:
         if code != 0:
             raise RuntimeError("Blender exited with code %d (see the job log)" % code)
         return "%d preview(s) rendered" % rendered if rendered else "nothing to render"
+
+    # ---- 3D preview meshes ----------------------------------------------------
+    def preview_mesh(self, src):
+        """A GLB the browser can show for a USD or Alembic file: cache/preview_mesh/<key>.glb, converted once per
+        file version by tools/preview_mesh.py (Blender, in the background). Runs as a job (kind "preview_mesh") on
+        the calling request's thread; a second request for the same file waits for the first. Returns the key."""
+        st = os.stat(src)
+        key = hashlib.sha1(("%s|%d|%d" % (os.path.normcase(os.path.abspath(src)), st.st_mtime_ns, st.st_size))
+                           .encode("utf-8")).hexdigest()[:20]
+        out = os.path.join(PREVIEW_MESH, key + ".glb")
+        if os.path.exists(out):
+            return key
+        exe = find_blender(self.cfg)
+        if not exe:
+            raise RuntimeError("Previewing USD and Alembic needs Blender 4.2 or newer (set blender_exe in config/libraries.json)")
+        job = self.jobs.run("preview_mesh", lambda job: self._convert_preview(job, exe, src, out), key=key,
+                            label="Converting %s for the 3D preview" % os.path.basename(src), timeout=900)
+        if job is None or job.state != "succeeded" or not os.path.exists(out):
+            raise RuntimeError((job and job.error) or "Couldn't convert %s for the preview" % os.path.basename(src))
+        return key
+
+    def _convert_preview(self, job, exe, src, out):
+        os.makedirs(PREVIEW_MESH, exist_ok=True)
+        script = os.path.join(ROOT, "tools", "preview_mesh.py")
+        flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW: never flash a console
+        job.progress(step="converting in Blender")
+        r = subprocess.run([exe, "-b", "--factory-startup", "--python-exit-code", "1", "--python", script, "--", src, out],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900,
+                           stdin=subprocess.DEVNULL, creationflags=flags)
+        job.write((r.stdout or "")[-6000:])
+        if r.returncode != 0 or not os.path.exists(out):
+            raise RuntimeError("Blender couldn't convert %s (see the job log)" % os.path.basename(src))
+        return "%s: %.1f MB GLB" % (os.path.basename(src), os.path.getsize(out) / 1e6)
 
     # ---- thumbnails --------------------------------------------------------
     def thumb_path(self, preview, size=None):
@@ -896,6 +931,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._file(pv)
             t = APP.make_thumb(a["id"], pv, size=want)  # tif/exr/hdr or huge: serve a web-sized render
             return self._file(t, "image/webp") if t and os.path.exists(t) else self._placeholder(a)
+        if p.startswith("/preview-mesh/"):  # a converted USD / Alembic preview (see App.preview_mesh)
+            name = p[len("/preview-mesh/"):]
+            if not re.fullmatch(r"[0-9a-f]{20}\.glb", name):
+                return self._json({"error": "not found"}, 404)
+            return self._stream(os.path.join(PREVIEW_MESH, name))
         if p.startswith("/api/files/"):  # what the 3D preview can load for this asset
             a = APP.catalog.get(unquote(p[len("/api/files/"):]))
             if not a:
@@ -996,6 +1036,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "error": "Give the filter a name"})
             APP.catalog.save_filter(name, b.get("query"), time.time())
             return self._json({"ok": True})
+        if p == "/api/preview-mesh":  # {id, idx}: convert that USD / Alembic mesh for the 3D preview
+            a = APP.catalog.get(b.get("id", ""))
+            files = asset_files(a) if a else []
+            try:
+                role, kind, path, _ = files[int(b.get("idx", -1))]
+            except (TypeError, ValueError, IndexError):
+                return self._json({"ok": False, "error": "not found"}, 404)
+            if role != "mesh" or kind not in PREVIEW_CONVERT:
+                return self._json({"ok": False, "error": "only USD and Alembic meshes are converted"}, 400)
+            try:
+                return self._json({"ok": True, "url": "/preview-mesh/%s.glb" % APP.preview_mesh(path)})
+            except (OSError, RuntimeError, subprocess.SubprocessError) as e:
+                return self._json({"ok": False, "error": str(e)})
         if p == "/api/favorite":
             APP.catalog.set_favorite(b["id"], bool(b.get("on")), time.time())
             return self._json({"ok": True})
@@ -1004,6 +1057,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/health/action":
             if b.get("do") == "clear_splat_cache":
                 shutil.rmtree(os.path.join(CACHE, "splat_conv"), ignore_errors=True)
+                shutil.rmtree(PREVIEW_MESH, ignore_errors=True)
                 APP.health_async()  # queued even when a check is running, so the cleared issue goes away
                 return self._json({"ok": True, "message": "Cleared the converted-splat cache"})
             if b.get("do") == "rescan":

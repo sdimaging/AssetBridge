@@ -296,7 +296,9 @@
     S.items = [];
     S.done = false;
     S.loading = false;  // a request from the old generation may still be in flight; it can no longer clear this flag
+    WIN.lo = WIN.hi = WIN.cols = 0;
     $("#grid").replaceChildren();
+    $("#grid").style.paddingTop = $("#grid").style.paddingBottom = "";
     $("#grid-wrap").scrollTop = 0;
     renderCrumbs();
     loadMore();
@@ -310,12 +312,9 @@
       const r = await api("/api/assets?" + queryString(S.items.length));
       if (gen !== S.gen) return;
       S.total = r.total;
-      const start = S.items.length;
       S.items.push(...r.items);
       S.done = S.items.length >= r.total || r.items.length === 0;
-      const frag = document.createDocumentFragment();
-      r.items.forEach((a, i) => frag.append(card(a, start + i)));
-      $("#grid").append(frag);
+      renderWindow();
       $("#result-count").textContent = S.total.toLocaleString() + (S.total === 1 ? " asset" : " assets");
       $("#empty").hidden = S.total > 0;
       if (!S.total) $("#empty-msg").textContent = S.q ? `Nothing matches “${S.q}”.` :
@@ -334,6 +333,65 @@
   function sentinelVisible() {
     const r = $("#sentinel").getBoundingClientRect();
     return r.top < window.innerHeight + 600;
+  }
+
+  // ------------------------------------------------------------- windowed grid
+  // S.items holds every record loaded so far, but only the rows near the viewport exist as cards. Padding on
+  // #grid stands in for the rows above and below, so the scrollbar and the infinite-scroll sentinel behave as if
+  // every card were there, and scrolling through 25,000 assets costs what a few screens cost.
+  const WIN = { lo: 0, hi: 0, cols: 0, rowH: 0 };
+  const BUFFER_ROWS = 4;  // rows kept beyond each edge of the viewport
+  let winFrame = 0;
+  function scheduleWindow() { if (!winFrame) winFrame = requestAnimationFrame(() => { winFrame = 0; renderWindow(); }); }
+
+  function cardsFor(lo, hi) {
+    const frag = document.createDocumentFragment();
+    for (let i = lo; i < hi; i++) frag.append(card(S.items[i], i));
+    return frag;
+  }
+
+  function gridTop() {  // where row 0 starts, in the scroll container's coordinates
+    const wrap = $("#grid-wrap");
+    return $("#grid").getBoundingClientRect().top - wrap.getBoundingClientRect().top + wrap.scrollTop;
+  }
+
+  function renderWindow() {
+    const g = $("#grid"), wrap = $("#grid-wrap"), n = S.items.length;
+    if (!n || wrap.hidden || !wrap.clientHeight) return;
+    const cs = getComputedStyle(g);
+    const cols = Math.max(1, cs.gridTemplateColumns.split(" ").length);
+    if (!g.firstElementChild) {  // nothing to measure a row from yet: start with two rows at the top
+      g.append(cardsFor(0, Math.min(n, cols * 2)));
+      Object.assign(WIN, { lo: 0, hi: Math.min(n, cols * 2), cols });
+    }
+    const rowH = g.firstElementChild.offsetHeight + (parseFloat(cs.rowGap) || 0);
+    if (!rowH) return;
+    const y0 = wrap.scrollTop - gridTop(), rows = Math.ceil(n / cols);
+    const r0 = Math.max(0, Math.floor(y0 / rowH) - BUFFER_ROWS);
+    const r1 = Math.min(rows, Math.ceil((y0 + wrap.clientHeight) / rowH) + BUFFER_ROWS);
+    const lo = Math.min(r0 * cols, Math.max(0, (rows - 1) * cols)), hi = Math.min(n, Math.max(r1 * cols, lo + cols));
+    if (cols !== WIN.cols || lo >= WIN.hi || hi <= WIN.lo) {
+      g.replaceChildren(cardsFor(lo, hi));
+    } else {
+      for (let i = WIN.lo; i < lo; i++) g.firstElementChild.remove();
+      for (let i = hi; i < WIN.hi; i++) g.lastElementChild.remove();
+      if (lo < WIN.lo) g.prepend(cardsFor(lo, WIN.lo));
+      if (hi > WIN.hi) g.append(cardsFor(WIN.hi, hi));
+    }
+    Object.assign(WIN, { lo, hi, cols, rowH });
+    g.style.paddingTop = (lo / cols) * rowH + "px";
+    g.style.paddingBottom = (rows - Math.ceil(hi / cols)) * rowH + "px";
+  }
+
+  // bring card i into view (keyboard moves can step past the rendered rows)
+  function revealCard(i) {
+    const wrap = $("#grid-wrap");
+    if ((i < WIN.lo || i >= WIN.hi) && WIN.rowH) {
+      wrap.scrollTop = gridTop() + Math.floor(i / WIN.cols) * WIN.rowH - wrap.clientHeight / 3;
+      renderWindow();
+    }
+    const el = $(`.card[data-idx="${i}"]`);
+    if (el) el.scrollIntoView({ block: "nearest" });
   }
 
   function card(a, idx) {
@@ -364,6 +422,7 @@
         h("div", { class: "name", text: a.name, title: a.name }),
         h("div", { class: "sub", text: (S.library ? "" : a.library + " · ") + (a.subtitle || "") })));
     if (a.color) el.append(h("div", { class: "colorbar", style: "background:" + a.color }));
+    if (S.pulling.has(a.id)) el.classList.add("sending");
     return el;
   }
 
@@ -413,7 +472,7 @@
       if (fresh) setHero(S.heroMode);
     }
     $("#t-3d").hidden = !!a.remote;  // nothing to load until it's pulled
-    if (a.remote && S.heroMode === "3d") { $("#d-img").hidden = false; $("#d-viewer").hidden = true; $("#d-vbar").hidden = true; }
+    if (a.remote && S.heroMode === "3d") { $("#d-img").hidden = false; $("#d-viewer").hidden = true; release3D(); }
     $("#d-name").textContent = a.name;
     $("#d-fav").classList.toggle("on", !!a.favorite);
     const meta = [a.library, info.label || a.type];
@@ -522,7 +581,7 @@
     $("#d-vbar").hidden = true;
     if (S.selAsset) renderViews(S.selAsset);
     if (mode === "3d" && S.selAsset) { clearTimeout(heroTimer); heroTimer = setTimeout(() => load3D(S.selAsset), 220); }
-    else { $("#d-vstatus").hidden = true; }
+    else release3D();
   }
 
   async function filesFor(a) {
@@ -559,6 +618,14 @@
     items.push(h("span", { class: "sp" }));
     if (a.type === "splat" && (a.meshes || []).length) items.push(h("button", { text: "Proxy", title: "Overlay the proxy mesh",
       onclick: (e) => { const on = !e.target.classList.contains("on"); e.target.classList.toggle("on", on); S.viewer.toggleProxy(on); } }));
+    if (S.viewer.clips.length) {
+      items.push(h("button", { text: "Pause", class: "on", title: "Play or pause the animation",
+        onclick: (e) => { const on = !e.target.classList.contains("on"); e.target.classList.toggle("on", on);
+          e.target.textContent = on ? "Pause" : "Play"; S.viewer.setPlaying(on); } }));
+      if (S.viewer.clips.length > 1) items.push(h("select", { title: "Animation clip",
+        onchange: (e) => S.viewer.playClip(+e.target.value) },
+        ...S.viewer.clips.map((c, i) => h("option", { value: i, text: c.name || "Clip " + (i + 1) }))));
+    }
     items.push(h("button", { text: "Spin", class: "on", title: "Auto-rotate",
       onclick: (e) => { const on = !e.target.classList.contains("on"); e.target.classList.toggle("on", on); S.viewer.controls.autoRotate = on; } }));
     bar.replaceChildren(...items);
@@ -697,13 +764,13 @@
     delete S.fabFiles[id];
     const a = await api("/api/asset/" + enc(id));
     if (a.error) return;
+    const item = { id: a.id, library: a.library, type: a.type, name: a.name, color: a.color, fav: !!a.favorite,
+      resolutions: a.resolutions || [], has_thumb: !!a.preview, format: a.format, importable: a.importable,
+      subtitle: a.subtitle, blender_ok: a.blender_ok, remote: !!a.remote, tv: a.tv };
+    const i = S.items.findIndex(x => x.id === id);
+    if (i >= 0) S.items[i] = item;
     el = el || $(`.card[data-id="${CSS.escape(id)}"]`);
-    if (el && el.isConnected) {
-      const item = { id: a.id, library: a.library, type: a.type, name: a.name, color: a.color, fav: !!a.favorite,
-        resolutions: a.resolutions || [], has_thumb: !!a.preview, format: a.format, importable: a.importable,
-        subtitle: a.subtitle, blender_ok: a.blender_ok, remote: !!a.remote, tv: a.tv };
-      el.replaceWith(card(item, +el.dataset.idx));
-    }
+    if (el && el.isConnected) el.replaceWith(card(item, +el.dataset.idx));
     if (S.selAsset && S.selAsset.id === id) select(id);
   }
 
@@ -787,6 +854,8 @@
     const on = !(btn ? btn.classList.contains("on") : a.favorite);
     await api("/api/favorite", { id: a.id, on });
     if (btn) btn.classList.toggle("on", on);
+    const rec = S.items.find(x => x.id === a.id);
+    if (rec) rec.fav = on;
     const c = $(`.card[data-id="${CSS.escape(a.id)}"] .favbtn`);
     if (c) c.classList.toggle("on", on);
     if (S.selAsset && S.selAsset.id === a.id) { S.selAsset.favorite = on; $("#d-fav").classList.toggle("on", on); }
@@ -900,6 +969,7 @@
     $("#size").addEventListener("input", e => {
       document.documentElement.style.setProperty("--card-size", e.target.value + "px");
       store.set("size", +e.target.value);
+      scheduleWindow();
     });
     $$("#sidebar [data-view]").forEach(b => b.addEventListener("click", () => setFilter({ view: b.dataset.view })));
     $("#btn-rescan").addEventListener("click", async () => {
@@ -970,6 +1040,8 @@
     // infinite scroll
     new IntersectionObserver(es => { if (es.some(e => e.isIntersecting)) loadMore(); },
       { root: $("#grid-wrap"), rootMargin: "600px" }).observe($("#sentinel"));
+    $("#grid-wrap").addEventListener("scroll", scheduleWindow, { passive: true });
+    new ResizeObserver(scheduleWindow).observe($("#grid-wrap"));
 
     // keyboard
     document.addEventListener("keydown", e => {
@@ -1004,8 +1076,8 @@
         const next = Math.max(0, Math.min(S.items.length - 1, cur < 0 ? 0 : cur + step));
         const a = S.items[next];
         select(a.id);
-        const el = $(`.card[data-id="${CSS.escape(a.id)}"]`);
-        el && el.scrollIntoView({ block: "nearest" });
+        revealCard(next);
+        if (next >= S.items.length - 10 * cols) loadMore();  // the next page lands before the keys reach the end
       }
     });
   }
@@ -1054,6 +1126,15 @@
     S.sel = null; S.selAsset = null;
     $$(".card.sel").forEach(c => c.classList.remove("sel"));
     $("#detail").hidden = true;
+    release3D();
+  }
+
+  // drop the 3D viewer (scene, textures, splat sorter, WebGL context); the next 3D preview builds a fresh one
+  function release3D() {
+    clearTimeout(heroTimer);
+    if (S.viewer) { S.viewer.dispose(); S.viewer = null; }
+    $("#d-vbar").hidden = true;
+    $("#d-vstatus").hidden = true;
   }
 
   wire();

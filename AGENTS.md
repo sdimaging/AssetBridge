@@ -9,6 +9,11 @@ You will usually be asked one of two things:
   Don't go on until it passes, and tell the user what you found at each step.
 - **"Change / fix / extend it."** Read [Part B](#part-b-how-it-works) for the map, use the recipes in
   [Part C](#part-c-recipes), and finish with the checks in [Part D](#part-d-before-you-say-its-done).
+- **"Pick something up from the roadmap" / "contribute this back."** [Part E](#part-e-roadmap-issues-and-pull-requests)
+  covers `ROADMAP.md`, issues and pull requests.
+
+One command checks everything that doesn't need a running app: `py -3 tools\check.py` (exit code 0 = pass).
+Run it before you change anything, so you know what was already failing, and again at the end.
 
 AssetBridge is a local asset browser: a Python server indexes asset folders on disk, a web UI browses them,
 and receiver plugins inside Cinema 4D and Blender import whatever the user sends. Windows 10/11 only.
@@ -207,6 +212,8 @@ server/bridge2.py                               HTTP routes, App (config, scans,
    │   c4d/Bridge2/bridge2_import.py  importer: geometry, Octane / Standard materials, HDRIs, splats (reloaded per send)
    └── blender/bridge2_blender/       __init__.py receiver, core.py importer + Principled materials, api.py scripting
 app/desktop_app.py    the native window (WebView2) that starts the server if it isn't running
+tools/preview_mesh.py  Blender script: USD / Alembic -> GLB for the 3D preview (run by the server, cached)
+tools/check.py         every automated check in one command
 ```
 
 ### B.1 The life of an asset
@@ -281,13 +288,34 @@ machine: `queued → running → succeeded | failed | cancelled`. A second reque
 queues and merges (scans, health, previews) or joins the running job (conversions, sends). The full
 map of job kinds, receiver states and UI state is in `STATE_MACHINES.md`.
 
-### B.6 Caches (all under `cache/`, safe to delete)
+### B.6 The grid, the 3D preview, and memory
+
+The catalogue lives in SQLite on disk, not in memory. The server holds no asset files; it streams them in
+chunks. On a 25,000-asset library it sits around 100 MB.
+
+- **Grid (`web/app.js`, "windowed grid").** `GET /api/assets` pages 240 records at a time into `S.items`, but
+  only the rows near the viewport exist as cards (`renderWindow()`, `WIN`, `BUFFER_ROWS`); padding on `#grid`
+  stands in for the rest. A card is rebuilt from its record when it scrolls back in, so code that changes a card
+  must update the record in `S.items` as well (see `toggleFav()`). Thumbnails are small WebPs, lazy-loaded.
+- **3D preview (`web/viewer.js`).** One viewer while the preview is open. `Viewer.show()` frees the previous
+  asset before loading the next; `release3D()` in `app.js` disposes the whole viewer (scene, textures, splat
+  sorter, WebGL context) when the panel closes or the hero goes back to Image. Splats load through Spark;
+  meshes at a mid LOD with the asset's maps at 1024 px.
+- **Formats in the preview.** GLB/glTF, FBX and OBJ load in the browser. USD (`.usd/.usda/.usdc/.usdz`) and
+  Alembic go to `POST /api/preview-mesh`, which runs `tools/preview_mesh.py` in a background Blender once per
+  file version (a `preview_mesh` job) and caches the GLB in `cache/preview_mesh/`. Transform animation is
+  baked to keys on the way; point-cache (vertex) animation shows its first frame. `.c4d` files have no preview.
+- **Animation.** Clips in glTF / FBX (and converted USD / Alembic) play in a loop with an `AnimationMixer`; the
+  viewer bar gets Play/Pause and, for several clips, a clip menu.
+
+### B.7 Caches (all under `cache/`, safe to delete)
 
 `bridge2.db` (the catalogue), `thumbs/` (card WebPs), `renders/` (Blender-rendered previews for models
-without one), `splat_conv/` (converted splats), `server.log`.
+without one), `splat_conv/` (converted splats), `preview_mesh/` (USD / Alembic converted for the 3D preview),
+`server.log`.
 `fab/index.json` and `fab/thumbs/` belong to the Fab library.
 
-### B.7 Security model
+### B.8 Security model
 
 The server and both receivers bind to `127.0.0.1` only. `Handler._refused()` rejects any request whose
 `Host` isn't localhost (DNS rebinding) and any POST whose `Origin` isn't the app's own page (cross-site
@@ -295,7 +323,7 @@ request forgery). Non-browser clients send no `Origin` and are unaffected. `/ass
 files that belong to an indexed asset. There is no authentication beyond that: anything that can open a
 TCP connection to localhost can use it, as with any local dev server.
 
-### B.8 HTTP API
+### B.9 HTTP API
 
 | method | path | does |
 |---|---|---|
@@ -309,16 +337,18 @@ TCP connection to localhost can use it, as with any local dev server.
 | GET | `/api/health` | the library health report (starts a check on first call) |
 | GET | `/api/libraries`, `/api/removed` | library config, assets the user removed |
 | GET | `/thumb/<id>`, `/preview/<id>[?i=N]`, `/asset-file/<id>/<n>/<name>` | card image, preview image, a file of the asset |
+| GET | `/preview-mesh/<key>.glb` | a USD / Alembic mesh converted for the 3D preview |
 | POST | `/api/send` `{id, options, target}` | send to `c4d` or `blender` (a job; replies when the import finishes) |
 | POST | `/api/rescan` `{library}` | queue a scan (all libraries if none given) |
 | POST | `/api/libraries` `{action: "add"/"remove", name, path, kind}` | edit the library list |
 | POST | `/api/favorite`, `/api/label`, `/api/remove`, `/api/restore` | favourites, labels, take out of / back into the library (files are never touched) |
 | POST | `/api/health/run`, `/api/health/action` | re-run the health check, act on an issue |
 | POST | `/api/reveal` `{id}` | show the asset in Explorer |
+| POST | `/api/preview-mesh` `{id, idx}` | convert mesh file `idx` of `/api/files/<id>` (USD or Alembic) for the 3D preview; replies `{ok, url}` when the GLB exists (a `preview_mesh` job; the first call per file waits for Blender) |
 | GET | `/api/fab/files?id=`, `/api/fab/index` | a Fab asset's quality tiers and what's on disk; index state |
 | POST | `/api/fab/pull` `{id, tier}`, `/api/fab/evict` `{id}`, `/api/fab/index` | download, free up space, re-crawl (jobs) |
 
-### B.9 The Fab library
+### B.10 The Fab library
 
 `server/fab.py` crawls Fab's public listing search for the free Quixel Megascans listings into
 `cache/fab/index.json` and serves each as a *remote* asset (virtual path `fab://<uid>`, thumbnail only).
@@ -361,9 +391,17 @@ the style of `tools/test_packs.py` (it builds tiny fake files in a temp folder).
 ### C.4 Change how materials are built
 
 Cinema 4D: `build_octane()` / `build_standard()` in `c4d/Bridge2/bridge2_import.py`. Blender:
-`build_material()` in `blender/bridge2_blender/core.py`. Colour maps are sRGB, data maps linear (Non-Color
-in Blender); gloss maps are inverted into roughness. Normal maps are used as they are (the health check flags
-libraries that only have DirectX normals). Change one app at a time and compare the same asset in both.
+`build_material()` in `blender/bridge2_blender/core.py`. Gloss maps are inverted into roughness. Normal maps are
+used as they are (the health check flags libraries that only have DirectX normals). Change one app at a time and
+compare the same asset in both.
+
+**Colour spaces.** Every texture gets one of three roles: `color` (an 8/16-bit colour map: sRGB), `linear` (a
+float EXR/HDR colour map: no gamma) or `data` (normal, roughness, displacement, …: non-colour). In Blender,
+`set_colorspace()` turns a role into a name that exists in the OCIO config Blender is running with (Blender's
+own, or an ACES / studio config set through `$OCIO`), trying the names in `CS_NAMES` in order and falling back
+to `is_data` for data maps. A config with other names: add them to `CS_NAMES`, then run
+`py -3 tools\test_colorspace.py`, which imports under Blender's config and an ACES-style one. In Cinema 4D the
+Octane image node's gamma and colour space do the same job (`FLOAT_EXT` maps are linear).
 
 ### C.5 A filter or a health check
 
@@ -377,26 +415,42 @@ Make it a job: `APP.jobs.submit(kind, fn, key=…, label=…, if_busy="queue" | 
 `job.progress(step=…, done=…, total=…)`, and return a JSON-able result. Return the job id from the route that
 starts it. Add the kind to the table in `STATE_MACHINES.md`.
 
+### C.7 A model format the 3D preview can't show
+
+If three.js has a loader for it, add the extension to `pickMesh()` and a branch to `loadModel()` in
+`web/viewer.js` (loaders live in `web/vendor/three/examples/jsm/loaders/`). If only Blender can read it, add the
+extension to `PREVIEW_CONVERT` in `server/bridge2.py` and `CONVERT` in `web/viewer.js`, and teach
+`tools/preview_mesh.py` to import it. Test the converter on its own first:
+`blender -b --factory-startup --python-exit-code 1 --python tools\preview_mesh.py -- <file> <out.glb>`.
+
 ---
 
 ## Part D: before you say it's done
 
-### D.1 Tests
+### D.1 Run the checks
 
 ```powershell
-py -3 tools\test_jobs.py      # the job state machine
-py -3 tools\test_packs.py     # splat packs and layered payloads
-py -3 tools\test_fab.py       # the Fab library (offline; --live pulls one small real asset)
+py -3 tools\check.py
 ```
 
-Each exits 0 and prints `all passed`.
+It compiles every Python file, runs `node --check` on the web scripts, and runs every `tools\test_*.py`:
 
-### D.2 Syntax
+| test | covers |
+|---|---|
+| `test_jobs.py` | the job state machine |
+| `test_packs.py` | splat packs and layered payloads |
+| `test_colorspace.py` | texture colour spaces under Blender's and an ACES-style OCIO config (needs Blender; skipped without it) |
+| `test_fab.py` | the Fab library (offline; `--live` pulls one small real asset) |
 
-```powershell
-py -3 -m compileall -q server tools c4d blender app
-node --check web\app.js; node --check web\viewer.js
-```
+It ends with `ALL CHECKS PASSED` and exit code 0. A new test goes in `tools\test_<name>.py`, prints
+`PASS …` / `FAIL …` lines and exits non-zero on failure; `check.py` picks it up by name.
+
+### D.2 Memory
+
+Grid or 3D-preview changes can bring back the memory use the windowed grid and `release3D()` removed. In Task
+Manager, watch the app's WebView2 processes while you scroll a few thousand cards and open and close a large
+splat. The page's DOM should stay at a few thousand nodes however far you scroll
+(`document.getElementsByTagName("*").length` in the browser console).
 
 ### D.3 Run a test server on other ports
 
@@ -415,3 +469,19 @@ Cinema 4D or Blender. Say plainly what you could and couldn't check yourself.
 
 Tell the user what changed, what you tested and how, and anything left unverified (for example "not tried in
 Cinema 4D 2024").
+
+---
+
+## Part E: roadmap, issues and pull requests
+
+- **`ROADMAP.md`** lists what's being considered, each item with where to start in the code. Anyone can add to
+  it: open an issue with the *Feature request* form, or a pull request that adds a line.
+- **Picking an item:** check the open issues and pull requests for it first, and say on the issue that you're
+  taking it. Keep the change to that one item.
+- **Doing it:** follow Parts B-D. User-visible changes also update `README.md` (what it does), this file (how it
+  works, the API table, a recipe if there's a new pattern) and `STATE_MACHINES.md` (any new job kind or state).
+  Move the item to *Done* in `ROADMAP.md` with one line.
+- **The pull request:** the template asks what changed, why, and how it was tested; paste the end of
+  `py -3 tools\check.py`, and say what you checked by hand in Cinema 4D or Blender and what you couldn't.
+- **Bugs:** the *Bug report* form asks for versions and the end of `cache\server.log`. Reproduce on a scratch
+  library (D.3) before changing code.

@@ -43,6 +43,7 @@ _FALLBACK = {
 }
 TEX_COLOR, TEX_FLOAT = 0, 1
 CS_NONE, CS_SRGB, CS_LINEAR = 0, 1, 2
+FLOAT_EXT = (".exr", ".hdr")  # float textures: linear, never gamma-corrected
 
 
 def S(name):
@@ -839,11 +840,12 @@ def build_octane(maps, name, asset, opts, has_geometry):
         t.SetName(label)
         t[S("IMAGETEXTURE_FILE")] = path
         t[S("IMAGETEXTURE_MODE")] = mode
-        t[S("IMAGETEXTURE_GAMMA")] = 2.2 if color else 1.0
+        flt = path.lower().endswith(FLOAT_EXT)  # EXR/HDR colour is already linear
+        t[S("IMAGETEXTURE_GAMMA")] = 2.2 if color and not flt else 1.0
         if invert:
             t[S("IMAGETEXTURE_INVERT")] = True
         try:
-            t[S("IMAGETEX_COLOR_SPACE")] = CS_SRGB if color else CS_NONE
+            t[S("IMAGETEX_COLOR_SPACE")] = (CS_LINEAR if flt else CS_SRGB) if color else CS_NONE
         except Exception:
             pass
         mat.InsertShader(t)
@@ -956,7 +958,7 @@ def build_standard(maps, name):
     def bmp(path, linear):
         sh = c4d.BaseShader(c4d.Xbitmap)
         sh[c4d.BITMAPSHADER_FILENAME] = path
-        if linear:
+        if linear or path.lower().endswith(FLOAT_EXT):
             try:
                 sh[c4d.BITMAPSHADER_COLORPROFILE] = c4d.BITMAPSHADER_COLORPROFILE_LINEAR
             except Exception:
